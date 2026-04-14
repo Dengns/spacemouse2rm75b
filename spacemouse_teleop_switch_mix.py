@@ -1,4 +1,8 @@
-"""SpaceMouse teleoperation for RM75B — incremental Cartesian control via rm_movep_canfd."""
+"""SpaceMouse teleoperation for RM75B via rm_force_position_move_pose."""
+"""SpaceMouse teleoperation for RM75B — incremental Cartesian control via rm_movep_canfd.
+    ret = self.arm.arm.rm_force_position_move(param)
+    ret = self.arm.arm.rm_movep_canfd(pose_cmd.tolist(), follow=True)
+    双模式切换抖震"""
 
 import sys
 import argparse
@@ -7,10 +11,11 @@ import time
 
 import numpy as np
 
-import config_switch as cfg
+import config_switch_safety as cfg
 from spacemouse_input import SpaceMouseReader
 from rm75b import RM75BInterface
-from class_switch import USBRelayController 
+from class_switch import USBRelayController
+import Robotic_Arm.rm_robot_interface as rm
 
 
 class SpaceMouseTeleop(USBRelayController):
@@ -34,6 +39,10 @@ class SpaceMouseTeleop(USBRelayController):
         self._consecutive_fails = 0
         self._gripper_pos = float(cfg.GRIPPER_OPEN_POS)  # 当前夹爪位置 (0~1000)
         self._relay_ready = False
+        self._force_hold = False
+        self._hold_pose = None
+        self._z_down_limited = False
+        self._force_payload_warned = False
 
     # ------ setup / teardown ------
 
@@ -45,7 +54,7 @@ class SpaceMouseTeleop(USBRelayController):
 
         # 2. Robot arm + gripper
         self.arm = RM75BInterface(self.ip, self.port, enable_gripper=(cfg.GRIPPER_MODE != "Switching"))
-
+        
         if cfg.GRIPPER_MODE == "Switching":
             try:
                 self.connect()
@@ -55,6 +64,10 @@ class SpaceMouseTeleop(USBRelayController):
                 print(f"[WARN] Relay connect failed: {e}")
 
         # 3. Read current pose as starting point
+        # 将六维力数据清零，标定当前状态下的零位
+        self.arm.arm.rm_clear_force_data()
+        # 开启透传力位混合控制补偿模式
+        self.arm.arm.rm_start_force_position_move()
         ret, state = self.arm.arm.rm_get_current_arm_state()
         if ret != 0:
             raise RuntimeError(f"Failed to read arm state (ret={ret})")
@@ -151,12 +164,89 @@ class SpaceMouseTeleop(USBRelayController):
                 except Exception as e:
                     print(f"[WARN] Relay command failed: {e}")
 
+    def _read_force_wrench(self):
+        """Read and return [Fx, Fy, Fz, Mx, My, Mz]. Returns None on failure."""
+        try:
+            result = self.arm.arm.rm_get_force_data()
+        except Exception as e:
+            print(f"[WARN] rm_get_force_data failed: {e}")
+            return None
+
+        ret = 0
+        payload = result
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], (int, np.integer)):
+            ret, payload = result
+        if ret != 0:
+            print(f"[WARN] rm_get_force_data returned {ret}")
+            return None
+
+        if isinstance(payload, dict):
+            # Some SDK versions may return keyed dicts directly.
+            if all(k in payload for k in ("Fx", "Fy", "Fz", "Mx", "My", "Mz")):
+                return np.array([
+                    payload["Fx"], payload["Fy"], payload["Fz"],
+                    payload["Mx"], payload["My"], payload["Mz"],
+                ], dtype=float)
+
+            # RM SDK (v1.1.4+) returns rm_force_data_t as dict with these keys.
+            for key in ("zero_force_data", "work_zero_force_data", "tool_zero_force_data", "force_data", "force", "data"):
+                if key in payload and payload[key] is not None:
+                    payload = payload[key]
+                    break
+            else:
+                if not self._force_payload_warned:
+                    self._force_payload_warned = True
+                    print(f"[WARN] Unknown force payload keys: {list(payload.keys())}")
+                payload = None
+        if payload is None:
+            print("[WARN] Force payload missing")
+            return None
+
+        try:
+            force6 = np.array(payload[:6], dtype=float)
+            if force6.shape[0] < 6:
+                print(f"[WARN] Invalid force payload length: {force6.shape[0]}")
+                return None
+        except Exception as e:
+            print(f"[WARN] Force payload parse failed: {e}")
+            return None
+
+        return force6
+
+    def _update_z_down_limit(self, force6):
+        """Update Z-down limit state from directional Fz force (no smoothing)."""
+        if not bool(cfg.FORCE_Z_LIMIT_ENABLE):
+            if self._z_down_limited:
+                self._z_down_limited = False
+                print("[SAFE] Z-down limit disabled -> OFF")
+            return 0.0
+
+        direction = 1.0 if float(cfg.FORCE_Z_LIMIT_DIRECTION) >= 0.0 else -1.0
+        fz_dir = direction * float(force6[2])
+
+        # 向下如果受到阻碍，力是负数，所以不等号右侧都加了-号
+        if (not self._z_down_limited) and (fz_dir <= -float(cfg.FORCE_Z_LIMIT_TRIGGER_N)):
+            self._z_down_limited = True
+            print(
+                f"[SAFE] Directional Fz {fz_dir:.2f} N >= "
+                f"{float(cfg.FORCE_Z_LIMIT_TRIGGER_N):.2f} N -> Z down LOCK"
+            )
+        elif self._z_down_limited and (fz_dir >= -float(cfg.FORCE_Z_LIMIT_RELEASE_N)):
+            self._z_down_limited = False
+            print(
+                f"[SAFE] Directional Fz {fz_dir:.2f} N <= "
+                f"{float(cfg.FORCE_Z_LIMIT_RELEASE_N):.2f} N -> Z down UNLOCK"
+            )
+
+        return fz_dir
+
     # ------ main loop ------
 
     def run(self):
         """50 Hz control loop."""
         dt = 1.0 / cfg.CONTROL_RATE_HZ
         print(f"Running at {cfg.CONTROL_RATE_HZ} Hz.  Ctrl+C to stop.\n")
+    
 
         while True:
             t0 = time.monotonic()
@@ -166,24 +256,78 @@ class SpaceMouseTeleop(USBRelayController):
 
             # 2. Compute incremental delta
             delta = self._compute_delta(raw)
-            
-            # 3. Accumulate target pose
-            self.target_pose += delta
 
-            # 4. Workspace clamp
+            # 3. Read force and update stop/hold state
+            # 查询六维力传感器力信息
+            force6 = self._read_force_wrench()
+            if force6 is None:
+                if not self._force_hold:
+                    self._force_hold = True
+                    self._hold_pose = self.target_pose.copy()
+                    print("[SAFE] Force feedback unavailable -> HOLD")
+            else:
+                force_norm = float(np.linalg.norm(force6[:3]))
+                fz_dir = self._update_z_down_limit(force6)
+
+                print(
+                    "[FT] "
+                    f"Fx={force6[0]:+7.3f} N  "
+                    f"Fy={force6[1]:+7.3f} N  "
+                    f"Fz={force6[2]:+7.3f} N  "
+                    f"Mx={force6[3]:+7.3f} Nm  "
+                    f"My={force6[4]:+7.3f} Nm  "
+                    f"Mz={force6[5]:+7.3f} Nm  "
+                    f"|F|={force_norm:6.3f} N  "
+                    f"Fz_dir={fz_dir:+6.3f} N  "
+                    f"Zlock={'ON' if self._z_down_limited else 'OFF'}",
+                    end="\r",
+                    flush=True,
+                )
+
+                if self._force_hold:
+                    self._force_hold = False
+                    self.target_pose = self._hold_pose.copy()
+                    print("[SAFE] Force feedback restored -> RESUME")
+
+            # 4. Accumulate target pose when not holding
+            if not self._force_hold:
+                self.target_pose += delta
+
+            # 5. Workspace clamp
             self._clamp_workspace()
-            # 5. Send to robot
-            ret = self.arm.arm.rm_movep_canfd(self.target_pose.tolist(), follow=True)
-            # ret = self.arm.arm.rm_movep_follow(self.target_pose.tolist())
 
-            # Get current position and print difference
-            ret_state, state = self.arm.arm.rm_get_current_arm_state()
-            if ret_state == 0:
-                current_pose = np.array(state["pose"], dtype=float)
-                pose_diff = self.target_pose - current_pose
-
-                print(f"Difference: {np.round(pose_diff*1000, 1).tolist()}\n")
-
+            # 6. Send to robot (hold pose only when force feedback is unavailable)
+            pose_cmd = self._hold_pose if self._force_hold else self.target_pose
+            
+            if self._z_down_limited:
+                # 狂震
+                param = rm.rm_force_position_move_t(
+                    flag=1,
+                    pose=pose_cmd.tolist(),
+                    sensor=1,
+                    mode=1,
+                    follow=True,
+                    control_mode=[3, 3, 2, 3, 3, 3],
+                    desired_force=[0, 0, 0, 0, 0, 0],
+                    limit_vel=[0.1, 0.1, 0.1, 1, 1, 1]
+                )
+                ret = self.arm.arm.rm_force_position_move(param)
+                # 修改,冻结Z轴位置
+                # pose_cmd[2] = 0.0 
+                # param = rm.rm_force_position_move_t(
+                #     flag=1,
+                #     pose=pose_cmd.tolist(),
+                #     sensor=1,
+                #     mode=1,
+                #     follow=False,
+                #     control_mode=[3, 3, 2, 3, 3, 3],
+                #     desired_force=[0, 0, 0, 0, 0, 0],
+                #     limit_vel=[0.1, 0.1, 0.1, 1, 1, 1]
+                # )
+                # ret = self.arm.arm.rm_force_position_move(param)
+            else:
+                ret = self.arm.arm.rm_movep_canfd(pose_cmd.tolist(), follow=True)
+                
             if ret != 0:
                 self._consecutive_fails += 1
                 if self._consecutive_fails >= 10:
@@ -193,10 +337,10 @@ class SpaceMouseTeleop(USBRelayController):
             else:
                 self._consecutive_fails = 0
 
-            # 6. Gripper buttons
+            # 7. Gripper buttons
             self._handle_buttons()
 
-            # 7. Timing
+            # 8. Timing
             elapsed = time.monotonic() - t0
             sleep_time = dt - elapsed
             if sleep_time > 0:

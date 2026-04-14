@@ -48,8 +48,8 @@ MOVEV_RADIO = 50                          # acceleration ratio (SDK-defined sema
 # 这里单纯是数值，方向在主程序里面加了负号
 FORCE_Z_LIMIT_ENABLE = True             # True: enable directional Fz protection
 FORCE_Z_LIMIT_DIRECTION = 1             # +1: trigger when Fz > threshold, -1: trigger when Fz < -threshold
-FORCE_Z_LIMIT_TRIGGER_N = 1.5           # lock threshold (N), enters "Z down blocked" state 锁定阈值
-FORCE_Z_LIMIT_RELEASE_N = 0.8           # unlock threshold (N), should be lower than trigger for hysteresis 放松的阈值
+FORCE_Z_LIMIT_TRIGGER_N = 1.0           # lock threshold (N), enters "Z down blocked" state 锁定阈值
+FORCE_Z_LIMIT_RELEASE_N = 0.6           # unlock threshold (N), should be lower than trigger for hysteresis 放松的阈值
 
 # --- Axis mapping: SpaceMouse -> robot [x, y, z, rx, ry, rz] ---
 AXIS_SIGNS = [1, -1, 1, -1, 1, 1]       # flip signs to match intuitive directions

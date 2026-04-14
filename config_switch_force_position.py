@@ -43,15 +43,13 @@ MOVEV_RADIO = 50                          # acceleration ratio (SDK-defined sema
 
 # --- Force-position streaming (rm_force_position_move_pose) ---
 # Signature:
-# rm_force_position_move_pose(pose, sensor, mode, dir, force, follow)
-FORCE_TASK_SENSOR = 1                    # sensor index (SDK-defined)
-FORCE_TASK_MODE = 1                      # force-position mode (官网示例: 六维力沿工具坐标系指定方向)
-FORCE_TASK_DIR = 2                       # 0~5 -> Fx,Fy,Fz,Mx,My,Mz
-FORCE_TARGET = 1.0                       # target force / torque on FORCE_TASK_DIR axis
-FORCE_THRESHOLD = 0.1                    # acceptable error band around FORCE_TARGET
-FORCE_TASK_FOLLOW = True                 # follow mode for transparent streaming
-FORCE_DEBUG_PRINT_EVERY = 1              # print interval in control cycles
-MAX_CONSECUTIVE_FORCE_CMD_FAILS = 2     # emergency stop threshold
+
+# --- Directional Z-force limit (allow Z up, block Z down when triggered) ---
+# 这里单纯是数值，方向在主程序里面加了负号
+FORCE_Z_LIMIT_ENABLE = True             # True: enable directional Fz protection
+FORCE_Z_LIMIT_DIRECTION = 1             # +1: trigger when Fz > threshold, -1: trigger when Fz < -threshold
+FORCE_Z_LIMIT_TRIGGER_N = 1.0           # lock threshold (N), enters "Z down blocked" state 锁定阈值
+FORCE_Z_LIMIT_RELEASE_N = 0.6           # unlock threshold (N), should be lower than trigger for hysteresis 放松的阈值
 
 # --- Axis mapping: SpaceMouse -> robot [x, y, z, rx, ry, rz] ---
 AXIS_SIGNS = [1, -1, 1, -1, 1, 1]       # flip signs to match intuitive directions

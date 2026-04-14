@@ -17,7 +17,7 @@ LIBSPNAV_PATH = os.path.join(_HERE, "libspnav.so.0.4")
 
 # --- SpaceMouse input processing ---
 DEADZONE = 40                            # raw axis dead-zone (full range ~+-350)
-TRANSLATION_SCALE = 0.0002 / 350.0       # full deflection -> 0.0004 m/cycle (0.02 m/s @ 50Hz)
+TRANSLATION_SCALE = 0.0004 / 350.0       # full deflection -> 0.0004 m/cycle (0.02 m/s @ 50Hz)
 ROTATION_SCALE = 0.002 / 350.0           # full deflection -> 0.005 rad/cycle (0.25 rad/s @ 50Hz)
 
 MAX_TRANSLATION_PER_CYCLE = 0.001        # m, hard clamp per cycle
@@ -44,7 +44,7 @@ MOVEV_RADIO = 50                          # acceleration ratio (SDK-defined sema
 # --- Axis mapping: SpaceMouse -> robot [x, y, z, rx, ry, rz] ---
 AXIS_SIGNS = [1, -1, 1, -1, 1, 1]       # flip signs to match intuitive directions
 AXIS_MAP = [2, 0, 1, 5, 3, 4]           # reorder axes if needed
-AXIS_ENABLE = [1, 1, 1, 0, 0, 1]        # 各轴开关: [x, y, z, rx, ry, rz], 0=屏蔽 1=启用
+AXIS_ENABLE = [1, 1, 1, 0, 0, 0]        # 各轴开关: [x, y, z, rx, ry, rz], 0=屏蔽 1=启用
 
 # --- Workspace limits (meters, in robot base frame) ---
 WORKSPACE_MIN = [-0.5, -0.5, 0.0]

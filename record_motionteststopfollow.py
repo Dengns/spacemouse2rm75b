@@ -103,7 +103,7 @@ def main():
 
     signal.signal(signal.SIGINT, _sigint)
 
-    control_hz = 100
+    control_hz = 50
     dt = 1.0 / control_hz
     print(f"Recording at {control_hz} Hz ... Press Ctrl+C to stop.\n")
 
@@ -137,7 +137,8 @@ def main():
         for i in range(3):
             target_pose[i] = np.clip(target_pose[i], cfg.WORKSPACE_MIN[i], cfg.WORKSPACE_MAX[i])
 
-        ret = arm.arm.rm_movep_canfd(target_pose.tolist(), follow=True)
+        # ret = arm.arm.rm_movep_canfd(target_pose.tolist(), follow=True)
+        ret = arm.arm.rm_movep_follow(target_pose.tolist())
         if ret != 0:
             consecutive_fails += 1
             if consecutive_fails >= 10:
