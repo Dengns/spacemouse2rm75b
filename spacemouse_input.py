@@ -124,14 +124,10 @@ class SpaceMouseReader:
 
             if ev.type == SPNAV_EVENT_MOTION:
                 m = ev.motion
-                axes = [
-                    self._apply_deadzone(m.x),
-                    self._apply_deadzone(m.y),
-                    self._apply_deadzone(m.z),
-                    self._apply_deadzone(m.rx),
-                    self._apply_deadzone(m.ry),
-                    self._apply_deadzone(m.rz),
-                ]
+                raw_axes = [m.x, m.y, m.z, m.rx, m.ry, m.rz]
+                if any(v < -430 for v in raw_axes):
+                    raise Exception(f"mouse get axes error {raw_axes}")
+                axes = [self._apply_deadzone(v) for v in raw_axes]
                 with self._lock:
                     self._axes = axes
 
