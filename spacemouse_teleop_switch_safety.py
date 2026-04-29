@@ -111,12 +111,6 @@ class SpaceMouseTeleop(USBRelayController):
 
         return delta
 
-    def _clamp_workspace(self):
-        """Clamp target_pose xyz to workspace boundaries."""
-        for i in range(3):
-            self.target_pose[i] = np.clip(self.target_pose[i],
-                                          cfg.WORKSPACE_MIN[i], cfg.WORKSPACE_MAX[i])
-
     def _handle_buttons(self):
         """Process button events for gripper control."""
         if cfg.GRIPPER_MODE == "binary":
@@ -288,10 +282,16 @@ class SpaceMouseTeleop(USBRelayController):
                 # 遥操下移，delta[2]小于0
                 if self._z_down_limited and delta[2] < 0.0:
                     delta[2] = 0.0
+                # Workspace boundary: reject delta that would exceed limits (no clipping)
+                for i in range(3):
+                    proposed = self.target_pose[i] + delta[i]
+                    if proposed < cfg.WORKSPACE_MIN[i] or proposed > cfg.WORKSPACE_MAX[i]:
+                        raise RuntimeError(
+                            f"[SAFE] Workspace boundary exceeded on axis {i}: "
+                            f"proposed={proposed:.6f}, "
+                            f"range=[{cfg.WORKSPACE_MIN[i]:.6f}, {cfg.WORKSPACE_MAX[i]:.6f}]"
+                        )
                 self.target_pose += delta
-
-            # 5. Workspace clamp
-            self._clamp_workspace()
 
             # 6. Send to robot (hold pose only when force feedback is unavailable)
             pose_cmd = self._hold_pose if self._force_hold else self.target_pose
