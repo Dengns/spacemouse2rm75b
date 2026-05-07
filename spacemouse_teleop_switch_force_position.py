@@ -48,6 +48,15 @@ class SpaceMouseTeleop(USBRelayController):
         # 2. Robot arm + gripper
         self.arm = RM75BInterface(self.ip, self.port, enable_gripper=(cfg.GRIPPER_MODE != "Switching"))
 
+        if cfg.UDP_FEEDBACK_ENABLE:
+            self.arm.enable_udp_realtime_feedback(
+                cfg.UDP_TARGET_IP,
+                cfg.UDP_TARGET_PORT,
+                cfg.UDP_CYCLE_MS,
+                cfg.UDP_FORCE_COORDINATE,
+            )
+            self.arm.register_udp_feedback_callback()
+
         if cfg.GRIPPER_MODE == "Switching":
             try:
                 self.connect()
@@ -210,6 +219,30 @@ class SpaceMouseTeleop(USBRelayController):
         return force6
     # ------ main loop ------
 
+    def _read_force_wrench_udp(self):
+        state, age = self.arm.get_latest_udp_state(cfg.UDP_TIMEOUT_S)
+
+        # state check -----------------
+        if state is None:
+            print("[WARN] UDP feedback unavailable or timed out")
+            return None, age
+
+        force_sensor = state.get("force_sensor")
+        if force_sensor is None:
+            print(f"[WARN] UDP feedback missing force_sensor. keys={list(state.keys())}")
+            return None, age
+        # state check -----------------
+       
+        values = force_sensor.get("zero_force")
+        if values is None:
+            raise RuntimeError(f"UDP force_sensor missing zero_force field. keys={list(force_sensor.keys())}")
+
+        force6 = np.array(values[:6], dtype=float)
+        if force6.shape[0] != 6:
+            raise RuntimeError(f"Invalid UDP zero_force length: {force6.shape[0]}, values={values}")
+
+        return force6, age
+
     def run(self):
         """50 Hz control loop."""
         dt = 1.0 / cfg.CONTROL_RATE_HZ
@@ -225,7 +258,10 @@ class SpaceMouseTeleop(USBRelayController):
             delta = self._compute_delta(raw)
 
             # 查询六维力传感器力信息
-            force6 = self._read_force_wrench()
+            if cfg.UDP_FEEDBACK_ENABLE:
+                force6, force_age = self._read_force_wrench_udp()
+            else:
+                force6, force_age = self._read_force_wrench(), None
             
             # 3. Accumulate target pose
             self.target_pose += delta
@@ -247,7 +283,6 @@ class SpaceMouseTeleop(USBRelayController):
                 )
             ret = self.arm.arm.rm_force_position_move(param)
 
-
             # Get current position and print difference
             ret_state, state = self.arm.arm.rm_get_current_arm_state()
             if ret_state == 0:
@@ -255,11 +290,17 @@ class SpaceMouseTeleop(USBRelayController):
                 pose_diff = self.target_pose - current_pose
 
                 f_str = f"F: {np.round(force6[:3], 1).tolist() if force6 is not None else 'N/A'}"
+                age_str = f"{force_age * 1000:.0f}ms" if force_age is not None else ("UDP:N/A" if cfg.UDP_FEEDBACK_ENABLE else "TCP")
                 z_val = current_pose[2]
                 diff_str = np.round(pose_diff[:3]*1000, 1).tolist()
                 
                 # Use \r and sys.stdout.write to print in-place and prevent scrolling
-                sys.stdout.write(f"\rZ: {z_val:.4f}m | {f_str} | Diff(mm): {diff_str}        ")
+                sys.stdout.write(
+                    f"\rZ: {z_val:.4f}m | "
+                    f"{f_str} | "
+                    f"age={age_str} | "
+                    f"Diff(mm): {diff_str}        "
+                )
                 sys.stdout.flush()
 
             if ret != 0:
