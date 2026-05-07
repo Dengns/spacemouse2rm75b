@@ -73,12 +73,25 @@ class SpaceMouseTeleop(USBRelayController):
         if isinstance(ret_start, int) and ret_start != 0:
             raise RuntimeError(f"rm_start_force_position_move failed (ret={ret_start})")
         # 3. Read current pose as starting point
-        ret, state = self.arm.arm.rm_get_current_arm_state()
-        if ret != 0:
-            raise RuntimeError(f"Failed to read arm state (ret={ret})")
-        # state["pose"] = [x, y, z, rx, ry, rz] (m / rad)
-        self.target_pose = np.array(state["pose"], dtype=float)
-        print(f"Start pose: {np.round(self.target_pose, 4).tolist()}")
+        if cfg.UDP_FEEDBACK_ENABLE:
+            deadline = time.monotonic() + 1.0
+            self.target_pose = None
+            while time.monotonic() < deadline:
+                force6, current_pose, feedback_age = self._read_udp_feedback()
+                if current_pose is not None:
+                    self.target_pose = current_pose.copy()
+                    break
+                time.sleep(0.005)
+            if self.target_pose is None:
+                raise RuntimeError("Failed to read initial pose from UDP feedback")
+            print(f"Start pose from UDP: {np.round(self.target_pose, 4).tolist()}")
+        else:
+            ret, state = self.arm.arm.rm_get_current_arm_state()
+            if ret != 0:
+                raise RuntimeError(f"Failed to read arm state (ret={ret})")
+            # state["pose"] = [x, y, z, rx, ry, rz] (m / rad)
+            self.target_pose = np.array(state["pose"], dtype=float)
+            print(f"Start pose: {np.round(self.target_pose, 4).tolist()}")
 
     def teardown(self, slow_stop: bool = True):
         """Clean shutdown: stop arm, open gripper, disconnect."""
@@ -219,20 +232,26 @@ class SpaceMouseTeleop(USBRelayController):
         return force6
     # ------ main loop ------
 
-    def _read_force_wrench_udp(self):
+    def _read_udp_feedback(self):
         state, age = self.arm.get_latest_udp_state(cfg.UDP_TIMEOUT_S)
 
         # state check -----------------
         if state is None:
             print("[WARN] UDP feedback unavailable or timed out")
-            return None, age
+            return None, None, age
 
         force_sensor = state.get("force_sensor")
         if force_sensor is None:
             print(f"[WARN] UDP feedback missing force_sensor. keys={list(state.keys())}")
-            return None, age
+            return None, None, age
+
+        waypoint = state.get("waypoint")
+        if waypoint is None:
+            print(f"[WARN] UDP feedback missing waypoint. keys={list(state.keys())}")
+            return None, None, age
         # state check -----------------
-       
+
+        # force check -----------------
         values = force_sensor.get("zero_force")
         if values is None:
             raise RuntimeError(f"UDP force_sensor missing zero_force field. keys={list(force_sensor.keys())}")
@@ -240,8 +259,28 @@ class SpaceMouseTeleop(USBRelayController):
         force6 = np.array(values[:6], dtype=float)
         if force6.shape[0] != 6:
             raise RuntimeError(f"Invalid UDP zero_force length: {force6.shape[0]}, values={values}")
+        # force check -----------------
 
-        return force6, age
+        # pose check -----------------
+        position = waypoint.get("position")
+        euler = waypoint.get("euler")
+        if position is None or euler is None:
+            raise RuntimeError(f"UDP waypoint missing position/euler field. keys={list(waypoint.keys())}")
+
+        pose = np.array([
+            position["x"],
+            position["y"],
+            position["z"],
+            euler["rx"],
+            euler["ry"],
+            euler["rz"],
+        ], dtype=float)
+
+        if pose.shape[0] != 6:
+            raise RuntimeError(f"Invalid UDP pose length: {pose.shape[0]}, values={pose}")
+        # pose check -----------------
+
+        return force6, pose, age
 
     def run(self):
         """50 Hz control loop."""
@@ -257,11 +296,18 @@ class SpaceMouseTeleop(USBRelayController):
             # 2. Compute incremental delta
             delta = self._compute_delta(raw)
 
-            # 查询六维力传感器力信息
+            # 查询实时反馈：UDP 模式一次拿六维力 + 当前位姿
             if cfg.UDP_FEEDBACK_ENABLE:
-                force6, force_age = self._read_force_wrench_udp()
+                force6, current_pose, feedback_age = self._read_udp_feedback()
             else:
-                force6, force_age = self._read_force_wrench(), None
+                force6 = self._read_force_wrench()
+                feedback_age = None
+
+                ret_state, state = self.arm.arm.rm_get_current_arm_state()
+                if ret_state == 0:
+                    current_pose = np.array(state["pose"], dtype=float)
+                else:
+                    current_pose = None
             
             # 3. Accumulate target pose
             self.target_pose += delta
@@ -283,18 +329,15 @@ class SpaceMouseTeleop(USBRelayController):
                 )
             ret = self.arm.arm.rm_force_position_move(param)
 
-            # Get current position and print difference
-            ret_state, state = self.arm.arm.rm_get_current_arm_state()
-            if ret_state == 0:
-                current_pose = np.array(state["pose"], dtype=float)
+            # 显示当前位姿误差；UDP 模式下 current_pose 来自 state["waypoint"]
+            if current_pose is not None:
                 pose_diff = self.target_pose - current_pose
 
                 f_str = f"F: {np.round(force6[:3], 1).tolist() if force6 is not None else 'N/A'}"
-                age_str = f"{force_age * 1000:.0f}ms" if force_age is not None else ("UDP:N/A" if cfg.UDP_FEEDBACK_ENABLE else "TCP")
+                age_str = f"{feedback_age * 1000:.0f}ms" if feedback_age is not None else "TCP"
                 z_val = current_pose[2]
                 diff_str = np.round(pose_diff[:3]*1000, 1).tolist()
-                
-                # Use \r and sys.stdout.write to print in-place and prevent scrolling
+
                 sys.stdout.write(
                     f"\rZ: {z_val:.4f}m | "
                     f"{f_str} | "

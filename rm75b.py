@@ -15,8 +15,8 @@ try:
         rm_udp_custom_config_t,
         rm_realtime_push_config_t,
         rm_realtime_arm_state_callback_ptr,
-
     )
+    
 except ImportError:
     _local_sdk = os.path.join(os.path.dirname(__file__), "../../../../repos/RMDemo_ModbusRTU-ZhiXing/src")
     if os.path.isdir(_local_sdk):
