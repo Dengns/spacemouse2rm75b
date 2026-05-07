@@ -50,6 +50,15 @@ class SpaceMouseTeleop(USBRelayController):
         # 2. Robot arm + gripper
         self.arm = RM75BInterface(self.ip, self.port, enable_gripper=(cfg.GRIPPER_MODE != "Switching"))
 
+        if cfg.UDP_FEEDBACK_ENABLE:
+            self.arm.enable_udp_realtime_feedback(
+                cfg.UDP_TARGET_IP,
+                cfg.UDP_TARGET_PORT,
+                cfg.UDP_CYCLE_MS,
+                cfg.UDP_FORCE_COORDINATE,
+            )
+            self.arm.register_udp_feedback_callback()
+
         if cfg.GRIPPER_MODE == "Switching":
             try:
                 self.connect()
@@ -61,13 +70,26 @@ class SpaceMouseTeleop(USBRelayController):
         # 3. Read current pose as starting point
         # 将六维力数据清零，标定当前状态下的零位
         self.arm.arm.rm_clear_force_data()
-        
-        ret, state = self.arm.arm.rm_get_current_arm_state()
-        if ret != 0:
-            raise RuntimeError(f"Failed to read arm state (ret={ret})")
-        # state["pose"] = [x, y, z, rx, ry, rz] (m / rad)
-        self.target_pose = np.array(state["pose"], dtype=float)
-        print(f"Start pose: {np.round(self.target_pose, 4).tolist()}")
+
+        if cfg.UDP_FEEDBACK_ENABLE:
+            deadline = time.monotonic() + 1.0
+            self.target_pose = None
+            while time.monotonic() < deadline:
+                force6, current_pose, feedback_age = self._read_udp_feedback()
+                if current_pose is not None:
+                    self.target_pose = current_pose.copy()
+                    break
+                time.sleep(0.005)
+            if self.target_pose is None:
+                raise RuntimeError("Failed to read initial pose from UDP feedback")
+            print(f"Start pose from UDP: {np.round(self.target_pose, 4).tolist()}")
+        else:
+            ret, state = self.arm.arm.rm_get_current_arm_state()
+            if ret != 0:
+                raise RuntimeError(f"Failed to read arm state (ret={ret})")
+            # state["pose"] = [x, y, z, rx, ry, rz] (m / rad)
+            self.target_pose = np.array(state["pose"], dtype=float)
+            print(f"Start pose: {np.round(self.target_pose, 4).tolist()}")
 
     def teardown(self, slow_stop: bool = True):
         """Clean shutdown: stop arm, open gripper, disconnect."""
@@ -201,6 +223,56 @@ class SpaceMouseTeleop(USBRelayController):
 
         return force6
 
+    def _read_udp_feedback(self):
+        state, age = self.arm.get_latest_udp_state(cfg.UDP_TIMEOUT_S)
+
+        # state check -----------------
+        if state is None:
+            print("[WARN] UDP feedback unavailable or timed out")
+            return None, None, age
+
+        force_sensor = state.get("force_sensor")
+        if force_sensor is None:
+            print(f"[WARN] UDP feedback missing force_sensor. keys={list(state.keys())}")
+            return None, None, age
+
+        waypoint = state.get("waypoint")
+        if waypoint is None:
+            print(f"[WARN] UDP feedback missing waypoint. keys={list(state.keys())}")
+            return None, None, age
+        # state check -----------------
+
+        # force check -----------------
+        values = force_sensor.get("zero_force")
+        if values is None:
+            raise RuntimeError(f"UDP force_sensor missing zero_force field. keys={list(force_sensor.keys())}")
+
+        force6 = np.array(values[:6], dtype=float)
+        if force6.shape[0] != 6:
+            raise RuntimeError(f"Invalid UDP zero_force length: {force6.shape[0]}, values={values}")
+        # force check -----------------
+
+        # pose check -----------------
+        position = waypoint.get("position")
+        euler = waypoint.get("euler")
+        if position is None or euler is None:
+            raise RuntimeError(f"UDP waypoint missing position/euler field. keys={list(waypoint.keys())}")
+
+        pose = np.array([
+            position["x"],
+            position["y"],
+            position["z"],
+            euler["rx"],
+            euler["ry"],
+            euler["rz"],
+        ], dtype=float)
+
+        if pose.shape[0] != 6:
+            raise RuntimeError(f"Invalid UDP pose length: {pose.shape[0]}, values={pose}")
+        # pose check -----------------
+
+        return force6, pose, age
+
     def _update_z_down_limit(self, force6):
         """Update Z-down limit state from directional Fz force (no smoothing)."""
         if not bool(cfg.FORCE_Z_LIMIT_ENABLE):
@@ -246,8 +318,12 @@ class SpaceMouseTeleop(USBRelayController):
             delta = self._compute_delta(raw)
 
             # 3. Read force and update stop/hold state
-            # 查询六维力传感器力信息
-            force6 = self._read_force_wrench()
+            # UDP 模式一次拿六维力 + 当前位姿；关闭 UDP 时保留原 TCP 读取。
+            if cfg.UDP_FEEDBACK_ENABLE:
+                force6, current_pose, feedback_age = self._read_udp_feedback()
+            else:
+                force6, current_pose, feedback_age = self._read_force_wrench(), None, None
+
             if force6 is None:
                 if not self._force_hold:
                     self._force_hold = True
@@ -256,6 +332,7 @@ class SpaceMouseTeleop(USBRelayController):
             else:
                 force_norm = float(np.linalg.norm(force6[:3]))
                 fz_dir = self._update_z_down_limit(force6)
+                age_str = f"{feedback_age * 1000:.0f}ms" if feedback_age is not None else "TCP"
 
                 print(
                     "[FT] "
@@ -267,7 +344,8 @@ class SpaceMouseTeleop(USBRelayController):
                     f"Mz={force6[5]:+7.3f} Nm  "
                     f"|F|={force_norm:6.3f} N  "
                     f"Fz_dir={fz_dir:+6.3f} N  "
-                    f"Zlock={'ON' if self._z_down_limited else 'OFF'}",
+                    f"Zlock={'ON' if self._z_down_limited else 'OFF'}  "
+                    f"age={age_str}",
                     end="\r",
                     flush=True,
                 )

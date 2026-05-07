@@ -3,7 +3,7 @@ import os
 import math
 import time
 from typing import List, Union
-
+import threading
 import numpy as np
 
 # Try pip-installed Robotic-Arm first, fall back to local source
@@ -12,7 +12,11 @@ try:
         RoboticArm,
         rm_thread_mode_e,
         rm_peripheral_read_write_params_t,
+        rm_udp_custom_config_t,
+        rm_realtime_push_config_t,
+        rm_realtime_arm_state_callback_ptr,
     )
+    
 except ImportError:
     _local_sdk = os.path.join(os.path.dirname(__file__), "../../../../repos/RMDemo_ModbusRTU-ZhiXing/src")
     if os.path.isdir(_local_sdk):
@@ -21,6 +25,10 @@ except ImportError:
         RoboticArm,
         rm_thread_mode_e,
         rm_peripheral_read_write_params_t,
+        rm_udp_custom_config_t,
+        rm_realtime_push_config_t,
+        rm_realtime_arm_state_callback_ptr,
+
     )
 
 DEG_TO_RAD = math.pi / 180.0
@@ -53,6 +61,13 @@ class RM75BInterface:
         self._last_gripper_pos = -9999  # force first write
         self._last_gripper_time = 0.0
 
+        #udp setting
+        self._udp_callback = None
+        self._latest_udp_state = None
+        self._latest_udp_time = 0.0 
+        self._last_udp_print_time = 0.0
+        self._udp_lock = threading.Lock()
+
         self.arm = RoboticArm(rm_thread_mode_e.RM_TRIPLE_MODE_E)
         handle = self.arm.rm_create_robot_arm(ip, port)
         if handle.id == -1:
@@ -76,6 +91,65 @@ class RM75BInterface:
             print(f"[WARN] Gripper enable returned {ret}")
         time.sleep(1.0)
         print("ZhiXing 90D gripper enabled via Modbus RTU.")
+
+    def enable_udp_realtime_feedback(self, target_ip: str, target_port: int, cycle_ms: int, force_coordinate: int):
+        custom = rm_udp_custom_config_t()
+        custom.joint_speed = 0   #关节速度
+        custom.lift_state = 0    #升降机构状态
+        custom.expand_state = 0  #扩展关节状态
+
+        config = rm_realtime_push_config_t(
+            cycle_ms,
+            True,
+            target_port,
+            force_coordinate,
+            target_ip,
+            custom,
+        )
+
+        ret = self.arm.rm_set_realtime_push(config)
+        if ret != 0:
+            raise RuntimeError(f"rm_set_realtime_push failed (ret={ret})")
+
+        hz = 1000.0 / cycle_ms
+        print(
+            f"UDP realtime feedback enabled: "
+            f"target={target_ip}:{target_port}, "
+            f"cycle={cycle_ms}ms, "
+            f"frequency={hz:.2f}Hz"
+        )
+
+    def register_udp_feedback_callback(self):
+        def _on_udp_state(data):
+            now = time.monotonic()
+            state = data.to_dict(recurse=True)
+
+            with self._udp_lock:
+                self._latest_udp_state = state
+                self._latest_udp_time = now
+
+            if now - self._last_udp_print_time >= 2.0:
+                self._last_udp_print_time = now
+                print("[UDP] feedback cached")
+
+        self._udp_callback = rm_realtime_arm_state_callback_ptr(_on_udp_state)
+        self.arm.rm_realtime_arm_state_call_back(self._udp_callback)
+        print("UDP realtime feedback callback registered.")
+
+    def get_latest_udp_state(self, max_age_s: float = 0.05):
+        with self._udp_lock:
+            state = self._latest_udp_state
+            timestamp = self._latest_udp_time
+
+        if state is None:
+            return None, None
+
+        #超过50ms的数据就return None
+        age = time.monotonic() - timestamp
+        if age > max_age_s:
+            return None, age
+
+        return state, age
 
     def get_joint_positions(self) -> np.ndarray:
         """Returns current joint positions in radians. Shape: (7,)"""
