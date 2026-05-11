@@ -10,6 +10,7 @@ What it does:
 Usage:
   python3 record_motionteststop_velocity.py --ip 192.168.5.105
   python3 record_motionteststop_velocity.py --out outputs/velocity_run.csv --hz 100
+  python3 record_motionteststop_velocity.py --feedback udp --udp-target-ip 192.168.1.104 --out outputs/velocity_udp.csv
 """
 
 import argparse
@@ -20,12 +21,14 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
 import config as cfg
 from rm75b import RM75BInterface
 from spacemouse_input import SpaceMouseReader
+from udp_feedback import enable_udp_feedback, read_udp_feedback, wait_for_udp_pose
 
 
 class ArmPoller(threading.Thread):
@@ -104,6 +107,7 @@ def _save_csv(path, rows):
         writer.writerow([
             "t",
             "inp_mag",
+            "feedback_age_ms",
             "cmd_vx", "cmd_vy", "cmd_vz",
             "cmd_wx", "cmd_wy", "cmd_wz",
             "act_vx", "act_vy", "act_vz",
@@ -124,11 +128,41 @@ def _auto_plot(csv_path):
         print(f"[WARN] Failed to auto-plot: {e}")
 
 
+def _udp_cfg_from_args(args):
+    return SimpleNamespace(
+        UDP_TARGET_IP=args.udp_target_ip,
+        UDP_TARGET_PORT=args.udp_target_port,
+        UDP_CYCLE_MS=args.udp_cycle_ms,
+        UDP_FORCE_COORDINATE=args.udp_force_coordinate,
+    )
+
+
+def _estimate_velocity(pose, pose_ts, last_pose, last_pose_ts):
+    vel = np.zeros(6)
+    if pose is not None and last_pose is not None and last_pose_ts is not None:
+        dt = pose_ts - last_pose_ts
+        if dt > 1e-6:
+            vel = (pose - last_pose) / dt
+    return vel
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip", default=cfg.ROBOT_IP)
     parser.add_argument("--port", type=int, default=cfg.ROBOT_PORT)
     parser.add_argument("--hz", type=int, default=100, help="Control loop rate in Hz")
+    parser.add_argument(
+        "--feedback",
+        choices=("tcp", "udp"),
+        default="tcp",
+        help="Actual pose feedback source for error logging",
+    )
+    parser.add_argument("--udp-target-ip", default=cfg.UDP_TARGET_IP, help="Local PC IP receiving robot UDP")
+    parser.add_argument("--udp-target-port", type=int, default=cfg.UDP_TARGET_PORT)
+    parser.add_argument("--udp-cycle-ms", type=int, default=cfg.UDP_CYCLE_MS)
+    parser.add_argument("--udp-force-coordinate", type=int, default=cfg.UDP_FORCE_COORDINATE)
+    parser.add_argument("--udp-timeout", type=float, default=cfg.UDP_TIMEOUT_S)
+    parser.add_argument("--udp-wait", type=float, default=1.5, help="Seconds to wait for first UDP pose")
     parser.add_argument(
         "--out",
         default=os.path.join(cfg.OUTPUT_DIR, "motion_velocity.csv"),
@@ -150,6 +184,9 @@ def main():
         if not hasattr(arm.arm, "rm_set_movev_canfd_init") or not hasattr(arm.arm, "rm_movev_canfd"):
             raise RuntimeError("SDK does not expose rm_set_movev_canfd_init/rm_movev_canfd")
 
+        if args.feedback == "udp":
+            enable_udp_feedback(arm, _udp_cfg_from_args(args))
+
         dt = 1.0 / float(args.hz)
         sdk_dt_ms = int(round(dt * 1000))
         init_ret = arm.arm.rm_set_movev_canfd_init(
@@ -160,23 +197,37 @@ def main():
         if init_ret != 0:
             raise RuntimeError(f"rm_set_movev_canfd_init failed (ret={init_ret})")
 
-        ret, state = arm.arm.rm_get_current_arm_state()
-        if ret != 0:
-            raise RuntimeError("Failed to read initial pose")
+        if args.feedback == "udp":
+            initial_pose = wait_for_udp_pose(
+                arm,
+                args.udp_timeout,
+                wait_s=args.udp_wait,
+            )
+            if initial_pose is None:
+                raise RuntimeError("Failed to read initial pose from UDP feedback")
+            target_pose = initial_pose.copy()
+            print(f"Start pose from UDP: {np.round(target_pose, 4).tolist()}")
+        else:
+            ret, state = arm.arm.rm_get_current_arm_state()
+            if ret != 0:
+                raise RuntimeError("Failed to read initial pose")
+            target_pose = np.array(state["pose"], dtype=float)
+            print(f"Start pose from TCP: {np.round(target_pose, 4).tolist()}")
 
-        target_pose = np.array(state["pose"], dtype=float)
-        print(f"Start pose: {np.round(target_pose, 4).tolist()}")
         print(
             f"Velocity mode init: dt={dt:.4f}s, frame_type={cfg.MOVEV_FRAME_TYPE}, "
-            f"avoid_singularity={cfg.MOVEV_AVOID_SINGULARITY}"
+            f"avoid_singularity={cfg.MOVEV_AVOID_SINGULARITY}, feedback={args.feedback.upper()}"
         )
 
-        poller = ArmPoller(arm, hz=cfg.ARM_STATE_POLL_HZ)
-        poller.start()
-        time.sleep(0.2)
+        if args.feedback == "tcp":
+            poller = ArmPoller(arm, hz=cfg.ARM_STATE_POLL_HZ)
+            poller.start()
+            time.sleep(0.2)
 
         t_start = time.perf_counter()
         smoothed = np.zeros(6)
+        last_udp_pose = None
+        last_udp_pose_ts = None
         consecutive_fails = 0
         print(f"Recording velocity mode at {args.hz} Hz ... Press Ctrl+C to stop.\n")
 
@@ -217,11 +268,22 @@ def main():
             else:
                 consecutive_fails = 0
 
-            actual, actual_vel, _ = poller.get_state()
+            feedback_age = None
+            if args.feedback == "udp":
+                _, actual, feedback_age = read_udp_feedback(arm, args.udp_timeout)
+                actual_ts = time.perf_counter()
+                actual_vel = _estimate_velocity(actual, actual_ts, last_udp_pose, last_udp_pose_ts)
+                if actual is not None:
+                    last_udp_pose = actual.copy()
+                    last_udp_pose_ts = actual_ts
+            else:
+                actual, actual_vel, _ = poller.get_state()
+
             if actual is not None and actual_vel is not None:
                 records.append([
                     round(now, 5),
                     inp_mag,
+                    "" if feedback_age is None else round(feedback_age * 1000, 3),
                     *[round(v, 6) for v in vel_cmd],
                     *[round(v, 6) for v in actual_vel],
                     *[round(v, 6) for v in target_pose],
@@ -230,9 +292,12 @@ def main():
                 err_mm = np.linalg.norm(target_pose[:3] - actual[:3]) * 1000
                 speed_mm = np.linalg.norm(vel_cmd[:3]) * 1000
                 act_speed_mm = np.linalg.norm(actual_vel[:3]) * 1000
+                age_str = ""
+                if feedback_age is not None:
+                    age_str = f"  udp_age={feedback_age * 1000:5.1f}ms"
                 print(
                     f"\r  t={now:6.2f}s  input={inp_mag:4.0f}  v_cmd={speed_mm:6.2f}mm/s  v_act={act_speed_mm:6.2f}mm/s  "
-                    f"error={err_mm:5.2f}mm  frames={len(records):5d}",
+                    f"error={err_mm:5.2f}mm{age_str}  frames={len(records):5d}",
                     end="",
                     flush=True,
                 )

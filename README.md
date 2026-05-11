@@ -47,6 +47,14 @@ python3 record_motionteststop_velocity.py --ip 192.168.5.105 --hz 100
 - CSV: `outputs/motion_velocity.csv`
 - PNG: `outputs/motion_velocity.png`（脚本结束后自动生成）
 
+如果要用 UDP 实时反馈重新测试 actual pose 误差：
+
+```bash
+python3 record_motionteststop_velocity.py --ip 192.168.1.18 --hz 100 --feedback udp --udp-target-ip 192.168.1.104 --out outputs/motion_velocity_udp.csv
+```
+
+其中 `--udp-target-ip` 是运行 Python 程序这台电脑的 IP，不是机器人 IP。
+
 ### 手动绘图
 
 ```bash

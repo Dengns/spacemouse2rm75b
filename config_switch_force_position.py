@@ -8,6 +8,15 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 ROBOT_IP = "192.168.1.18"
 ROBOT_PORT = 8080
 
+# --- UDP realtime feedback ---
+UDP_FEEDBACK_ENABLE = True
+UDP_TARGET_IP = "192.168.1.104"  # 运行 Python 程序的电脑 IP，不是机器人 IP
+UDP_TARGET_PORT = 8089
+UDP_CYCLE_MS = 5                  # 200HZ
+UDP_FORCE_COORDINATE = 0          # 0=传感器坐标系, 1=工作坐标系, 2=工具坐标系
+UDP_TIMEOUT_S = 0.05              # 超过 50ms 没收到反馈，就断
+
+
 # --- Control loop ---
 CONTROL_RATE_HZ = 100
 ARM_STATE_POLL_HZ = 200
