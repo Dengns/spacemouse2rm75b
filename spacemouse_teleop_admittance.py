@@ -4,6 +4,7 @@ import sys
 import argparse
 import signal
 import time
+from collections import deque
 
 import numpy as np
 
@@ -44,6 +45,11 @@ class SpaceMouseTeleop(USBRelayController):
         # 柔顺控制
         self._adm_offset = np.zeros(6)   # 因为柔顺控制额外产生的方向位移
         self._adm_vel = np.zeros(6)      # admittance velocity
+
+        # UDP 实际频率测量
+        self._udp_last_ts = 0.0          # arm._latest_udp_time 上次值
+        self._udp_frame_times = deque(maxlen=1000)  # 收到新帧的本地时间戳（1s 滑窗）
+        self._udp_frame_total = 0        # 累计新帧数
 
     # ------ setup / teardown ------
 
@@ -245,6 +251,13 @@ class SpaceMouseTeleop(USBRelayController):
             # 查询实时反馈：UDP 模式一次拿六维力 + 当前位姿
             if cfg.UDP_FEEDBACK_ENABLE:
                 force6, current_pose, feedback_age = read_udp_feedback(self.arm, cfg.UDP_TIMEOUT_S)
+
+                # UDP 实际频率统计：_latest_udp_time 变化说明来了新帧
+                cur_udp_ts = self.arm._latest_udp_time
+                if cur_udp_ts != self._udp_last_ts:
+                    self._udp_last_ts = cur_udp_ts
+                    self._udp_frame_times.append(time.monotonic())
+                    self._udp_frame_total += 1
             else:
                 force6 = self._read_force_wrench()
                 feedback_age = None
@@ -320,10 +333,16 @@ class SpaceMouseTeleop(USBRelayController):
                 z_val = current_pose[2]
                 diff_str = np.round(pose_diff[:3]*1000, 1).tolist()
 
+                # UDP 实际频率（最近 1s 滑窗）
+                now_t = time.monotonic()
+                udp_hz = sum(1 for t in self._udp_frame_times if now_t - t <= 1.0)
+                udp_str = f"udp={udp_hz}Hz" if cfg.UDP_FEEDBACK_ENABLE else "udp=off"
+
                 sys.stdout.write(
                     f"\rZ: {z_val:.4f}m | "
                     f"{f_str} | "
                     f"age={age_str} | "
+                    f"{udp_str} | "
                     f"Diff(mm): {diff_str}        "
                 )
                 sys.stdout.flush()
