@@ -38,6 +38,13 @@ class SpaceMouseTeleop(USBRelayController):
         self._gripper_pos = float(cfg.GRIPPER_OPEN_POS)  # 当前夹爪位置 (0~1000)
         self._relay_ready = False
 
+        self.control_mode = [3, 3, 3, 3, 3, 3]
+        self.desired_force = [0, 0, 5, 0, 0, 0]
+
+        # 柔顺控制
+        self._adm_offset = np.zeros(6)   # 因为柔顺控制额外产生的方向位移
+        self._adm_vel = np.zeros(6)      # admittance velocity
+
     # ------ setup / teardown ------
 
     def setup(self):
@@ -247,21 +254,57 @@ class SpaceMouseTeleop(USBRelayController):
                     current_pose = np.array(state["pose"], dtype=float)
                 else:
                     current_pose = None
-            
-            # 3. Accumulate target pose
+
+            # 2.5 Outer admittance control
+            if force6 is not None:
+                wrench = force6.copy()
+
+                deadzone = np.array([1.0, 1.0, 1.0, 0.05, 0.05, 0.05])
+                wrench[np.abs(wrench) < deadzone] = 0.0
+
+                M = np.array([3.0, 3.0, 3.0, 0.15, 0.15, 0.15])
+                B = np.array([80.0, 80.0, 80.0, 3.0, 3.0, 3.0])
+                K = np.array([300.0, 300.0, 300.0, 8.0, 8.0, 8.0])
+
+                desired = np.zeros(6)
+
+                vel_limit = np.array([0.02, 0.02, 0.02, 0.15, 0.15, 0.15])
+                offset_limit = np.array([0.03, 0.03, 0.03, 0.20, 0.20, 0.20])
+
+                a = (wrench - desired - B * self._adm_vel - K * self._adm_offset) / M
+
+                self._adm_vel = np.clip(self._adm_vel + a * dt, -vel_limit, vel_limit)
+                self._adm_offset = np.clip(
+                    self._adm_offset + self._adm_vel * dt, -offset_limit, offset_limit
+                )
+            else:
+                self._adm_vel[:] = 0.0
+
+            # 3. Update target pose by axis mode
+            if current_pose is not None:
+                for i, axis_mode in enumerate(self.control_mode):
+                    if axis_mode in (1, 4):
+                        self.target_pose[i] = current_pose[i]
+                        delta[i] = 0.0
+
             self.target_pose += delta
 
             # 4. Workspace clamp
             self._clamp_workspace()
             # 5. Send to robot
+
+            # 导纳控制
+            cmd_pose = self.target_pose.copy()
+            cmd_pose += self._adm_offset
+
             param = rm.rm_force_position_move_t(
                     flag=1,
-                    pose=self.target_pose.tolist(),
+                    pose=cmd_pose.tolist(),
                     sensor=1,
-                    mode=1,
+                    mode=0,
                     follow=False,
-                    control_mode=[3, 3, 4, 3, 3, 3],
-                    desired_force=[0, 0, 0.4, 0, 0, 0],
+                    control_mode=self.control_mode,
+                    desired_force=self.desired_force,
                     limit_vel=[0.1, 0.1, 0.1, 10, 10, 10],
                     # trajectory_mode=0,
                     # radio=50,
@@ -270,7 +313,7 @@ class SpaceMouseTeleop(USBRelayController):
 
             # 显示当前位姿误差；UDP 模式下 current_pose 来自 state["waypoint"]
             if current_pose is not None:
-                pose_diff = self.target_pose - current_pose
+                pose_diff = cmd_pose - current_pose
 
                 f_str = f"F: {np.round(force6[:3], 1).tolist() if force6 is not None else 'N/A'}"
                 age_str = f"{feedback_age * 1000:.0f}ms" if feedback_age is not None else "TCP"
