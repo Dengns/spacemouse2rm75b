@@ -5,7 +5,7 @@ import os
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 # --- Robot connection ---
-ROBOT_IP = "192.168.1.18"
+ROBOT_IP = "192.168.5.200"
 ROBOT_PORT = 8080
 
 # --- Control loop ---
