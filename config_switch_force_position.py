@@ -13,7 +13,7 @@ UDP_FEEDBACK_ENABLE = True
 UDP_TARGET_IP = "192.168.1.104"  # 运行 Python 程序的电脑 IP，不是机器人 IP
 UDP_TARGET_PORT = 8089
 UDP_CYCLE_MS = 5                  # 200HZ
-UDP_FORCE_COORDINATE = 0          # 0=传感器坐标系, 1=工作坐标系, 2=工具坐标系
+UDP_FORCE_COORDINATE = 1          # 0=传感器坐标系, 1=工作坐标系, 2=工具坐标系
 UDP_TIMEOUT_S = 0.05              # 超过 50ms 没收到反馈，就断
 
 
