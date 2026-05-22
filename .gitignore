@@ -2,5 +2,5 @@ __pycache__/
 *.pyc
 *.pyo
 .claude/
-./output
-./outputs
+output/
+outputs/
