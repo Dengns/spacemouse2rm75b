@@ -33,6 +33,17 @@ from udp_feedback import enable_udp_feedback, read_udp_feedback, wait_for_udp_po
 # Shared state
 # ============================================================================
 
+
+def _move_towards(value: float, target: float, max_step: float) -> float:
+    """按最大步长把标量推向目标值；max_step<=0 时保持原值。"""
+    if max_step <= 0.0:
+        return value
+    delta = target - value
+    if abs(delta) <= max_step:
+        return target
+    return value + np.sign(delta) * max_step
+
+
 @dataclass
 class SharedState:
     """三线程共享数据。所有读写都必须 with lock_。"""
@@ -48,6 +59,7 @@ class SharedState:
     adm_offset: np.ndarray = field(default_factory=lambda: np.zeros(6))
     cmd_pose: Optional[np.ndarray] = None
     feedback_age_ms: Optional[float] = None
+    z_in_contact: bool = False
 
     # 控制旗
     running: bool = True
@@ -217,6 +229,7 @@ class ThreadedAdmittanceTeleop(USBRelayController):
             with self.state.lock_:
                 if not self.state.running:
                     break
+                z_in_contact = self.state.z_in_contact
 
             # 1. 读 axes
             raw = self.mouse.get_axes()
@@ -236,6 +249,11 @@ class ThreadedAdmittanceTeleop(USBRelayController):
             delta[3:] = np.clip(delta[3:], -cfg.MAX_ROTATION_PER_CYCLE,
                                 cfg.MAX_ROTATION_PER_CYCLE)
             delta *= np.array(cfg.AXIS_ENABLE, dtype=float)
+
+            if (z_in_contact
+                    and bool(getattr(cfg, "ADM_Z_LOCK_TARGET_WHEN_IN_CONTACT", True))
+                    and delta[2] < 0.0):
+                delta[2] = 0.0
 
             # 3. 积分 + workspace clamp
             local_target += delta
@@ -285,6 +303,20 @@ class ThreadedAdmittanceTeleop(USBRelayController):
         deadzone = np.array(cfg.ADM_DEADZONE, dtype=float)
         vel_limit = np.array(cfg.ADM_VEL_LIMIT, dtype=float)
         offset_limit = np.array(cfg.ADM_OFFSET_LIMIT, dtype=float)
+        planar_axes = np.array([0, 1, 3, 4, 5], dtype=int)
+
+        # Z 向桌面接触特化参数：只对“压桌面”一侧做导纳，脱离接触时慢释放
+        z_table_mode = bool(getattr(cfg, "ADM_Z_TABLE_MODE_ENABLE", False))
+        z_contact_sign = float(getattr(cfg, "ADM_Z_CONTACT_SIGN", -1.0))
+        if abs(z_contact_sign) < 1e-6:
+            z_contact_sign = -1.0
+        z_contact_enter = float(getattr(cfg, "ADM_Z_CONTACT_ENTER_N", 2.0))
+        z_contact_exit = float(getattr(cfg, "ADM_Z_CONTACT_EXIT_N", 0.8))
+        z_force_alpha = float(np.clip(getattr(cfg, "ADM_Z_FORCE_LPF_ALPHA", 1.0), 0.0, 1.0))
+        z_release_vel = float(getattr(cfg, "ADM_Z_RELEASE_VEL", 0.0))
+        z_in_contact = False
+        z_force_filt = 0.0
+        z_contact_force = 0.0
 
         consecutive_fails = 0
         last_rate_print = time.monotonic()
@@ -311,14 +343,65 @@ class ThreadedAdmittanceTeleop(USBRelayController):
             if cfg.ADM_ENABLE and force6 is not None:
                 wrench = force6.copy()
                 wrench[np.abs(wrench) < deadzone] = 0.0
-                desired = np.zeros(6)
-                a = (wrench - desired - B * adm_vel - K * adm_offset) / M
-                adm_vel = np.clip(adm_vel + a * dt, -vel_limit, vel_limit)
-                adm_offset = np.clip(adm_offset + adm_vel * dt,
-                                     -offset_limit, offset_limit)
+
+                # xy + rotation: 维持原来的对称导纳
+                a_other = (
+                    wrench[planar_axes]
+                    - B[planar_axes] * adm_vel[planar_axes]
+                    - K[planar_axes] * adm_offset[planar_axes]
+                ) / M[planar_axes]
+                adm_vel[planar_axes] = np.clip(
+                    adm_vel[planar_axes] + a_other * dt,
+                    -vel_limit[planar_axes],
+                    vel_limit[planar_axes],
+                )
+                adm_offset[planar_axes] = np.clip(
+                    adm_offset[planar_axes] + adm_vel[planar_axes] * dt,
+                    -offset_limit[planar_axes],
+                    offset_limit[planar_axes],
+                )
+
+                if z_table_mode:
+                    z_force_filt = z_force_alpha * float(force6[2]) + (1.0 - z_force_alpha) * z_force_filt
+                    z_contact_force = max(0.0, z_contact_sign * z_force_filt)
+
+                    if z_in_contact:
+                        if z_contact_force <= z_contact_exit:
+                            z_in_contact = False
+                    elif z_contact_force >= z_contact_enter:
+                        z_in_contact = True
+
+                    if z_in_contact:
+                        # Z 轴用减法软死区，避免接触阈值附近的力突跳。
+                        z_wrench = max(0.0, z_contact_force - deadzone[2])
+                        a_z = (z_wrench - B[2] * adm_vel[2] - K[2] * adm_offset[2]) / M[2]
+                        adm_vel[2] = np.clip(adm_vel[2] + a_z * dt, -vel_limit[2], vel_limit[2])
+                        adm_offset[2] = np.clip(
+                            adm_offset[2] + adm_vel[2] * dt,
+                            -offset_limit[2],
+                            offset_limit[2],
+                        )
+                    else:
+                        adm_vel[2] = 0.0
+                        adm_offset[2] = _move_towards(
+                            adm_offset[2], 0.0, z_release_vel * dt
+                        )
+                else:
+                    z_contact_force = 0.0
+                    z_in_contact = False
+                    a_z = (wrench[2] - B[2] * adm_vel[2] - K[2] * adm_offset[2]) / M[2]
+                    adm_vel[2] = np.clip(adm_vel[2] + a_z * dt, -vel_limit[2], vel_limit[2])
+                    adm_offset[2] = np.clip(
+                        adm_offset[2] + adm_vel[2] * dt,
+                        -offset_limit[2],
+                        offset_limit[2],
+                    )
             else:
                 # 关闭导纳 或 无力反馈 → 速度清零，offset 保持
                 adm_vel[:] = 0.0
+                z_in_contact = False
+                z_contact_force = 0.0
+                z_force_filt = 0.0
                 if not cfg.ADM_ENABLE:
                     adm_offset[:] = 0.0   # 关闭时直接归零
 
@@ -353,6 +436,7 @@ class ThreadedAdmittanceTeleop(USBRelayController):
                 self.state.adm_offset = adm_offset.copy()
                 self.state.cmd_pose = cmd_pose.copy()
                 self.state.feedback_age_ms = age * 1000.0 if age is not None else None
+                self.state.z_in_contact = z_in_contact
 
             # 7. 夹爪事件
             if pending_buttons:
@@ -366,6 +450,8 @@ class ThreadedAdmittanceTeleop(USBRelayController):
                 print(f"[Control] actual={rate:.1f}Hz  "
                       f"age={age * 1000:.0f}ms  "
                       f"fz={force6[2]:.2f}N  "
+                      f"fz_c={z_contact_force:.2f}N  "
+                      f"z_contact={'ON' if z_in_contact else 'OFF'}  "
                       f"adm_z={adm_offset[2] * 1000:.1f}mm"
                       if (age is not None and force6 is not None)
                       else f"[Control] actual={rate:.1f}Hz (no fb)")
