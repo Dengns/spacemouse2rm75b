@@ -111,11 +111,13 @@ class RM75BInterface:
         if ret != 0:
             raise RuntimeError(f"rm_set_realtime_push failed (ret={ret})")
 
-        hz = 1000.0 / cycle_ms
+        # SDK 的 cycle 参数单位是 5ms 而非 1ms（注释"5ms的倍数"实为"以 5ms 为单位"）
+        actual_period_ms = cycle_ms * 5
+        hz = 1000.0 / actual_period_ms
         print(
             f"UDP realtime feedback enabled: "
             f"target={target_ip}:{target_port}, "
-            f"cycle={cycle_ms}ms, "
+            f"cycle_param={cycle_ms} (={actual_period_ms}ms), "
             f"frequency={hz:.2f}Hz"
         )
 
