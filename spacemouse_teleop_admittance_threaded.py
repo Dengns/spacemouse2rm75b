@@ -303,7 +303,17 @@ class ThreadedAdmittanceTeleop(USBRelayController):
         deadzone = np.array(cfg.ADM_DEADZONE, dtype=float)
         vel_limit = np.array(cfg.ADM_VEL_LIMIT, dtype=float)
         offset_limit = np.array(cfg.ADM_OFFSET_LIMIT, dtype=float)
-        planar_axes = np.array([0, 1, 3, 4, 5], dtype=int)
+
+        # 各轴导纳开关：默认 [1,1,1,1,1,1]（向后兼容旧 config）
+        axis_enable_raw = getattr(cfg, "ADM_AXIS_ENABLE", [1, 1, 1, 1, 1, 1])
+        adm_axis_enable = np.array(axis_enable_raw, dtype=bool)
+        # planar = xy + 三个旋转，只保留 enable 中为 True 的
+        planar_axes = np.array(
+            [i for i in (0, 1, 3, 4, 5) if adm_axis_enable[i]], dtype=int
+        )
+        z_axis_enabled = bool(adm_axis_enable[2])
+        print(f"[Adm] axis enable mask = {adm_axis_enable.astype(int).tolist()}  "
+              f"(planar={planar_axes.tolist()}, z={z_axis_enabled})")
 
         # Z 向桌面接触特化参数：只对“压桌面”一侧做导纳，脱离接触时慢释放
         z_table_mode = bool(getattr(cfg, "ADM_Z_TABLE_MODE_ENABLE", False))
@@ -339,29 +349,39 @@ class ThreadedAdmittanceTeleop(USBRelayController):
                 self.state.button_events.clear()
                 gripper_pos = self.state.gripper_pos
 
-            # 3. 导纳计算（可整体关掉）
+            # 3. 导纳计算（可整体关掉，也可按轴关掉）
             if cfg.ADM_ENABLE and force6 is not None:
-                wrench = force6.copy()
-                wrench[np.abs(wrench) < deadzone] = 0.0
+                # 软死区：|F| ≤ dz 时输出 0；|F| > dz 时输出 sign(F)·(|F|-dz)。
+                # 在死区边界处连续，不会像硬死区那样从 0 突跳到 ±dz。
+                excess = np.maximum(np.abs(force6) - deadzone, 0.0)
+                wrench = np.sign(force6) * excess
 
-                # xy + rotation: 维持原来的对称导纳
-                a_other = (
-                    wrench[planar_axes]
-                    - B[planar_axes] * adm_vel[planar_axes]
-                    - K[planar_axes] * adm_offset[planar_axes]
-                ) / M[planar_axes]
-                adm_vel[planar_axes] = np.clip(
-                    adm_vel[planar_axes] + a_other * dt,
-                    -vel_limit[planar_axes],
-                    vel_limit[planar_axes],
-                )
-                adm_offset[planar_axes] = np.clip(
-                    adm_offset[planar_axes] + adm_vel[planar_axes] * dt,
-                    -offset_limit[planar_axes],
-                    offset_limit[planar_axes],
-                )
+                # xy + rotation: 仅对启用的 planar 轴做对称导纳
+                if len(planar_axes) > 0:
+                    a_other = (
+                        wrench[planar_axes]
+                        - B[planar_axes] * adm_vel[planar_axes]
+                        - K[planar_axes] * adm_offset[planar_axes]
+                    ) / M[planar_axes]
+                    adm_vel[planar_axes] = np.clip(
+                        adm_vel[planar_axes] + a_other * dt,
+                        -vel_limit[planar_axes],
+                        vel_limit[planar_axes],
+                    )
+                    adm_offset[planar_axes] = np.clip(
+                        adm_offset[planar_axes] + adm_vel[planar_axes] * dt,
+                        -offset_limit[planar_axes],
+                        offset_limit[planar_axes],
+                    )
 
-                if z_table_mode:
+                if not z_axis_enabled:
+                    # Z 轴关闭：清零状态并跳过下面的 Z 块
+                    adm_vel[2] = 0.0
+                    adm_offset[2] = 0.0
+                    z_in_contact = False
+                    z_force_filt = 0.0
+                    z_contact_force = 0.0
+                elif z_table_mode:
                     z_force_filt = z_force_alpha * float(force6[2]) + (1.0 - z_force_alpha) * z_force_filt
                     z_contact_force = max(0.0, z_contact_sign * z_force_filt)
 

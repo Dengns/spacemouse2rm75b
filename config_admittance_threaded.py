@@ -45,7 +45,8 @@ WORKSPACE_MIN = [-0.5, -0.5, 0.0]
 WORKSPACE_MAX = [ 0.5,  0.5, 0.7]
 
 # --- Admittance parameters (M-B-K, 6-DoF, [x y z rx ry rz]) ---
-ADM_ENABLE        = True                                   # False 时跳过导纳计算，cmd_pose = target_pose
+ADM_ENABLE        = True                                   # 总开关：False 时跳过全部导纳，cmd_pose = target_pose
+ADM_AXIS_ENABLE   = [1, 1, 1, 0, 0, 0]                     # 各轴导纳开关 [x y z rx ry rz]，0=关 1=开
 ADM_M             = [3.0,  3.0,  3.0,  0.15, 0.15, 0.15]   # 虚拟质量
 ADM_B             = [80.0, 80.0, 80.0, 3.0,  3.0,  3.0]    # 阻尼
 ADM_K             = [300.0, 300.0, 300.0, 8.0, 8.0, 8.0]   # 刚度
