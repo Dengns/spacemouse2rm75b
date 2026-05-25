@@ -230,6 +230,7 @@ class ThreadedAdmittanceTeleop(USBRelayController):
                 if not self.state.running:
                     break
                 z_in_contact = self.state.z_in_contact
+                adm_z_offset = float(self.state.adm_offset[2])
 
             # 1. 读 axes
             raw = self.mouse.get_axes()
@@ -253,6 +254,13 @@ class ThreadedAdmittanceTeleop(USBRelayController):
             if (z_in_contact
                     and bool(getattr(cfg, "ADM_Z_LOCK_TARGET_WHEN_IN_CONTACT", True))
                     and delta[2] < 0.0):
+                delta[2] = 0.0
+
+            # adm_offset[z] 撑到限位后，禁止 target 继续向同方向积累（避免 cmd 失控压入）
+            z_offset_limit = float(cfg.ADM_OFFSET_LIMIT[2])
+            if (z_offset_limit > 0.0
+                    and abs(adm_z_offset) >= 0.95 * z_offset_limit
+                    and adm_z_offset * delta[2] < 0.0):
                 delta[2] = 0.0
 
             # 3. 积分 + workspace clamp
