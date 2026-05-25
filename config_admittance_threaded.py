@@ -48,8 +48,8 @@ WORKSPACE_MAX = [ 0.5,  0.5, 0.7]
 ADM_ENABLE        = True                                   # 总开关：False 时跳过全部导纳，cmd_pose = target_pose
 ADM_AXIS_ENABLE   = [1, 1, 1, 0, 0, 0]                     # 各轴导纳开关 [x y z rx ry rz]，0=关 1=开
 ADM_M             = [3.0,  3.0,  3.0,  0.15, 0.15, 0.15]   # 虚拟质量
-ADM_B             = [80.0, 80.0, 80.0, 3.0,  3.0,  3.0]    # 阻尼
-ADM_K             = [300.0, 300.0, 300.0, 8.0, 8.0, 8.0]   # 刚度
+ADM_B             = [80.0, 80.0, 800.0, 3.0,  3.0,  3.0]    # 阻尼
+ADM_K             = [300.0, 300.0, 800.0, 8.0, 8.0, 8.0]   # 刚度
 ADM_DEADZONE      = [1.0,  1.0,  1.0,  0.05, 0.05, 0.05]   # 力/力矩死区 (N / N·m)
 ADM_VEL_LIMIT     = [0.02, 0.02, 0.02, 0.15, 0.15, 0.15]   # 导纳速度限
 ADM_OFFSET_LIMIT  = [0.03, 0.03, 0.03, 0.20, 0.20, 0.20]   # 导纳位移限
@@ -57,12 +57,12 @@ ADM_OFFSET_LIMIT  = [0.03, 0.03, 0.03, 0.20, 0.20, 0.20]   # 导纳位移限
 # --- Z-axis desk contact tuning ---
 # 目标：xy 保持普通对称导纳；z 仅在“压桌面”这一侧进入柔顺，脱离接触后慢释放，避免明显弹起。
 ADM_Z_TABLE_MODE_ENABLE = True
-ADM_Z_CONTACT_SIGN      = -1.0    # 取值使得“压桌面时” ADM_Z_CONTACT_SIGN * Fz > 0
+ADM_Z_CONTACT_SIGN      = 1.0    # 取值使得“压桌面时” ADM_Z_CONTACT_SIGN * Fz > 0
 ADM_Z_CONTACT_ENTER_N   = 2.0     # 压缩法向力超过该值 -> 进入接触状态
 ADM_Z_CONTACT_EXIT_N    = 0.8     # 压缩法向力低于该值 -> 退出接触状态（滞回避免抖动）
 ADM_Z_FORCE_LPF_ALPHA   = 0.35    # Z 向接触判定低通；1.0=不过滤
-ADM_Z_RELEASE_VEL       = 0.004   # m/s，脱离接触后 adm_offset[z] 回零的最大速度
-ADM_Z_LOCK_TARGET_WHEN_IN_CONTACT = True  # 接触时禁止继续向下积累 target_pose[z]
+ADM_Z_RELEASE_VEL       = 0.008   # m/s，脱离接触后 adm_offset[z] 回零的最大速度
+ADM_Z_LOCK_TARGET_WHEN_IN_CONTACT = False  # 接触时禁止继续向下积累 target_pose[z]
 
 # --- rm_movep_canfd 下发参数 ---
 MOVEP_FOLLOW = True                      # True 高跟随 (要求周期 <= 10ms)
