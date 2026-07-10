@@ -179,6 +179,51 @@ class RM75BInterface:
         params = rm_peripheral_read_write_params_t(_GRIPPER_DEVICE_ADDR, addr, 1)
         self.arm.rm_write_single_register(params, value)
 
+    def _parse_read_result(self, result):
+        """Normalize a Modbus read return into a single int, or None on failure."""
+        if isinstance(result, tuple):
+            if len(result) == 2 and isinstance(result[0], (int, np.integer)):
+                ret, payload = result
+                if ret != 0:
+                    return None
+                result = payload
+        if isinstance(result, (list, tuple)) and result:
+            if isinstance(result[0], (int, np.integer)):
+                return int(result[0])
+        if isinstance(result, (int, np.integer)):
+            return int(result)
+        return None
+
+    def _read_gripper_reg(self, addr):
+        """Read a single 16-bit Modbus register on the gripper."""
+        if not self.enable_gripper:
+            return None
+        params = rm_peripheral_read_write_params_t(_GRIPPER_DEVICE_ADDR, addr, 1)
+        for fn_name in ("rm_read_single_register", "rm_read_holding_registers", "rm_read_input_registers"):
+            fn = getattr(self.arm, fn_name, None)
+            if fn is None:
+                continue
+            try:
+                result = fn(params, 1)
+            except TypeError:
+                try:
+                    result = fn(params)
+                except Exception:
+                    continue
+            value = self._parse_read_result(result)
+            if value is not None:
+                return value
+        return None
+
+    def get_gripper_position(self):
+        """Return gripper position (0~1000) or None if unavailable."""
+        high = self._read_gripper_reg(_GRIPPER_POS_HIGH_REG)
+        low = self._read_gripper_reg(_GRIPPER_POS_LOW_REG)
+        if high is None or low is None:
+            return None
+        pos = (int(high) << 16) | int(low)
+        return max(0, min(1000, pos))
+
     def set_gripper_position(self, position: float):
         """Set gripper position (0~1000, 0=closed, 1000=open).
         Writes 32-bit position as two separate 16-bit registers (high + low word),
